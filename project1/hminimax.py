@@ -1,189 +1,229 @@
+# project1/hminimax.py
 from pacman_module.game import Agent
 from pacman_module.pacman import Directions
 
-
-def manhattan_distance(xy1, xy2):
-    """Calculate Manhattan distance between two points."""
-    return abs(xy1[0] - xy2[0]) + abs(xy1[1] - xy2[1])
-
+def manhattan(a, b):
+    return abs(a[0]-b[0]) + abs(a[1]-b[1])
 
 class PacmanAgent(Agent):
-    def __init__(self):
-        super().__init__()
-        self.depth = 4
-        self.position_history = []
+    """
+    Minimax (Pacman MAX / Ghost MIN) + Alpha-Beta
+    - Endgame greedy switch (เหลืออาหาร 1 เม็ด → เร่งปิดจ๊อบอย่างปลอดภัย)
+    - Loop penalty เฉพาะตอนอาหาร > 1 (ไม่กดตอนจบเกม)
+    - Move ordering + Transposition table เพื่อลดเวลา
+    - Safe root filter: ตัดทางที่แพ้ทันทีออกตั้งแต่ต้น
+    """
 
+    def __init__(self, depth: int = 4):
+        super().__init__()
+        self.depth = int(depth)
+        self.position_history = []        # เก็บตำแหน่ง Pacman 4 ก้าวล่าสุด
+        self.ttable = {}                  # transposition table {(key): value}
+        self.max_hist = 4
+
+    # ===================== entry point =====================
     def get_action(self, state):
-        legal = state.getLegalActions(0)
+        legal = list(state.getLegalActions(0))
         if not legal:
             return Directions.STOP
-
-        if len(legal) > 1 and Directions.STOP in legal:
+        if Directions.STOP in legal and len(legal) > 1:
             legal.remove(Directions.STOP)
 
-        # --- START: THE "SMART" GREEDY ENDGAME SWITCH ---
+        # จัดลิสต์สถานะเบื้องต้น
         food_list = state.getFood().asList()
-        
-        # ถ้าเหลืออาหาร 1 เม็ด ให้เปลี่ยนเป็นโหมด Greedy ที่ฉลาดขึ้น
+        pac_pos = state.getPacmanPosition()
+
+        # ---- Endgame switch: เหลือเม็ดเดียว → โลภแบบฉลาด/ปลอดภัย ----
         if len(food_list) == 1:
+            target = food_list[0]
             best_score = -float('inf')
-            best_action = None
-            pacman_pos = state.getPacmanPosition()
-            
-            for action in legal:
-                successor = state.generateSuccessor(0, action)
-                if successor.isLose():
-                    continue # ถ้าเดินไปแล้วแพ้ทันที ไม่ต้องพิจารณา
+            best_act = None
+            for a in legal:
+                succ = state.generateSuccessor(0, a)
+                if succ.isLose():
+                    continue  # หลีกเลี่ยงทางที่ตายทันที
+                sp = succ.getPacmanPosition()
+                # เข้าใกล้อาหาร + เว้นระยะจากผี
+                ghosts = [g.getPosition() for g in succ.getGhostStates()]
+                gmin = min((manhattan(sp, (int(g[0]), int(g[1]))) for g in ghosts), default=999)
+                df = manhattan(sp, target)
 
-                successor_pos = successor.getPacmanPosition()
-                dist_to_food = manhattan_distance(successor_pos, food_list[0])
-                
-                ghost_positions = [g.getPosition() for g in successor.getGhostStates()]
-                dist_to_ghost = min([manhattan_distance(successor_pos, g) for g in ghost_positions])
+                # คะแนน: อยากห่างผี (x2) แต่ใกล้เม็ด (x3)
+                score = (gmin * 2) - (df * 3)
 
-                # ให้คะแนนโดยพิจารณา 2 อย่าง: ระยะห่างจากอาหาร และ ระยะห่างจากผี
-                # ทำให้มันอยากเข้าใกล้อาหาร แต่ก็ยังกลัวผีอยู่ด้วย
-                score = (dist_to_ghost * 2) - (dist_to_food * 3)
+                # ถ้าก้าวนี้ “กินเม็ดได้เลย” ให้บูสต์
+                if len(succ.getFood().asList()) < 1:
+                    score += 1000
 
                 if score > best_score:
-                    best_score = score
-                    best_action = action
+                    best_score, best_act = score, a
 
-            return best_action
-        # --- END: THE "SMART" GREEDY ENDGAME SWITCH ---
+            return best_act or legal[0]
 
+        # ---- ช่วงกลางเกม: ใช้ Alpha-Beta ----
+        # อัปเดตประวัติตำแหน่ง (สำหรับกันวนแบบเบา ๆ)
+        self.position_history.append(pac_pos)
+        if len(self.position_history) > self.max_hist:
+            self.position_history.pop(0)
 
-        # ถ้ายังเหลืออาหารเยอะ ให้ใช้ Alpha-Beta ที่ซับซ้อนและฉลาดเหมือนเดิม
+        # root: ตัดทางที่ตายทันที แล้วทำ move ordering
+        root_actions = []
+        for a in legal:
+            succ = state.generateSuccessor(0, a)
+            if succ.isLose():
+                continue  # ตายทันทีไม่ต้องลอง
+            e = self._eval_for_ordering(succ)  # heuristic เร็ว เพื่อเรียงก่อน
+            root_actions.append((e, a, succ))
+
+        if not root_actions:  # ถ้าทางที่ไม่ตายไม่มีเลย ก็เลือกอะไรก็ได้
+            return legal[0]
+
+        # จัดจากดี → แย่ (MAX node)
+        root_actions.sort(key=lambda x: x[0], reverse=True)
+
         best_score = -float('inf')
-        best_action = None
+        best_act = root_actions[0][1]  # เผื่อไว้
+        alpha, beta = float('-inf'), float('inf')
+        self.ttable.clear()  # เคลียร์แคชต่อเกม/ต่อคำขอ (ปลอดภัย)
 
-        # Update position history (ยังคงเดิม)
-        curr_pos = state.getPacmanPosition()
-        self.position_history.append(curr_pos)
-        if len(self.position_history) > 4:
-            self.position_history.pop(0)
-
-        for action in legal:
-            successor = state.generateSuccessor(0, action)
-            score = self.alpha_beta(
-                successor,
-                1,
-                1,
-                list(self.position_history),
-                float('-inf'),
-                float('inf')
+        for _, a, succ in root_actions:
+            score = self._alphabeta(
+                succ, agent_index=1, ply=1,
+                alpha=alpha, beta=beta,
+                pos_hist=tuple(self.position_history)
             )
             if score > best_score:
-                best_score = score
-                best_action = action
+                best_score, best_act = score, a
+            alpha = max(alpha, best_score)
+            if beta <= alpha:
+                break
 
-        return best_action if best_action else legal[0]
+        return best_act
 
-        # ถ้ายังเหลืออาหารเยอะ ให้ใช้ Alpha-Beta ที่ซับซ้อนและฉลาดเหมือนเดิม
-        best_score = float('-inf')
-        best_action = None
-
-        # Update position history (ยังคงเดิม)
-        curr_pos = state.getPacmanPosition()
-        self.position_history.append(curr_pos)
-        if len(self.position_history) > 4:
-            self.position_history.pop(0)
-
-        for action in legal:
-            successor = state.generateSuccessor(0, action)
-            score = self.alpha_beta(
-                successor,
-                1,
-                1,
-                list(self.position_history),
-                float('-inf'),
-                float('inf')
-            )
-            if score > best_score:
-                best_score = score
-                best_action = action
-
-        return best_action if best_action else legal[0]
-
-    def alpha_beta(self, state, agent_index, depth, position_history, alpha, beta):
+    # ===================== alpha-beta =====================
+    def _alphabeta(self, state, agent_index, ply, alpha, beta, pos_hist):
+        # terminal
         if state.isWin():
             return float('inf')
         if state.isLose():
             return float('-inf')
-        if depth >= self.depth * state.getNumAgents():
-            return self.evaluation_function(state, position_history)
-    
-        legal_moves = state.getLegalActions(agent_index)
-        if not legal_moves:
-            return self.evaluation_function(state, position_history)
-    
-        next_agent = (agent_index + 1) % state.getNumAgents()
-        next_depth = depth + 1
-    
-        if agent_index == 0:
-            # Pacman (MAX node)
-            value = float('-inf')
-            for action in legal_moves:
-                successor = state.generateSuccessor(agent_index, action)
-                new_history = position_history[1:] + [successor.getPacmanPosition()]
-                value = max(value, self.alpha_beta(successor, next_agent, next_depth, new_history, alpha, beta))
-                if value > beta:
-                    return value  # Prune
-                alpha = max(alpha, value)
-            return value
-        else:
-            # Ghost (MIN node)
-            value = float('inf')
-            for action in legal_moves:
-                successor = state.generateSuccessor(agent_index, action)
-                value = min(value, self.alpha_beta(successor, next_agent, next_depth, position_history, alpha, beta))
-                if value < alpha:
-                    return value  # Prune
-                beta = min(beta, value)
-            return value
+        num_agents = state.getNumAgents()
+        if ply >= self.depth * num_agents:
+            return self._evaluation_function(state, pos_hist)
 
-    def evaluation_function(self, state, position_history):
+        key = self._tt_key(state, agent_index, ply)
+        if key in self.ttable:
+            return self.ttable[key]
+
+        legal = list(state.getLegalActions(agent_index))
+        if not legal:
+            val = self._evaluation_function(state, pos_hist)
+            self.ttable[key] = val
+            return val
+
+        next_agent = (agent_index + 1) % num_agents
+        next_ply = ply + 1
+
+        # move ordering โดยประเมิน successor คร่าว ๆ
+        if agent_index == 0:
+            # Pacman (MAX): ดี → แย่
+            ordered = sorted(
+                ((self._eval_for_ordering(state.generateSuccessor(agent_index, a)), a)
+                 for a in legal),
+                key=lambda x: x[0],
+                reverse=True
+            )
+            v = float('-inf')
+            for _, a in ordered:
+                succ = state.generateSuccessor(agent_index, a)
+                # อัปเดต history เมื่อ Pacman เดิน
+                new_hist = pos_hist[1:] + (succ.getPacmanPosition(),) if len(pos_hist) >= self.max_hist else pos_hist + (succ.getPacmanPosition(),)
+                v = max(v, self._alphabeta(succ, next_agent, next_ply, alpha, beta, new_hist))
+                if v > beta:
+                    self.ttable[key] = v
+                    return v
+                alpha = max(alpha, v)
+            self.ttable[key] = v
+            return v
+        else:
+            # Ghost (MIN): แย่ → ดี (จากมุมมอง Pacman)
+            ordered = sorted(
+                ((self._eval_for_ordering(state.generateSuccessor(agent_index, a)), a)
+                 for a in legal),
+                key=lambda x: x[0]
+            )
+            v = float('inf')
+            for _, a in ordered:
+                succ = state.generateSuccessor(agent_index, a)
+                v = min(v, self._alphabeta(succ, next_agent, next_ply, alpha, beta, pos_hist))
+                if v < alpha:
+                    self.ttable[key] = v
+                    return v
+                beta = min(beta, v)
+            self.ttable[key] = v
+            return v
+
+    # ===================== evals & helpers =====================
+    def _evaluation_function(self, state, pos_hist):
+        """ประเมินแบบละเอียด ใช้ตอนถึงความลึกกำหนด"""
         if state.isWin():
             return 1e9
         if state.isLose():
             return -1e9
 
-        pacman_pos = state.getPacmanPosition()
-        food_list = state.getFood().asList()
-        ghost_states = state.getGhostStates()
-        ghost_positions = [g.getPosition() for g in ghost_states]
+        pac = state.getPacmanPosition()
+        foods = state.getFood().asList()
+        ghosts = state.getGhostStates()
+        gpos = [(int(g.getPosition()[0]), int(g.getPosition()[1])) for g in ghosts]
 
-        # โทษผีแบบแปรผัน (คงเดิม)
-        min_ghost_dist = min(manhattan_distance(pacman_pos, g) for g in ghost_positions)
-        if min_ghost_dist == 0:
+        # ระยะผี (โทษแปรผันแบบโค้ดเดิมของคุณ)
+        min_g = min((manhattan(pac, gp) for gp in gpos), default=999)
+        if min_g == 0:
             return -1e9
-        elif min_ghost_dist == 1:
-            ghost_penalty = -300
-        elif min_ghost_dist == 2:
-            ghost_penalty = -100
-        elif min_ghost_dist == 3:
-            ghost_penalty = -30
+        elif min_g == 1:
+            ghost_pen = -300
+        elif min_g == 2:
+            ghost_pen = -100
+        elif min_g == 3:
+            ghost_pen = -30
         else:
-            ghost_penalty = 0
+            ghost_pen = 0
 
-        # รางวัลหลัก: ลดจำนวนอาหาร (คงเดิม)
-        food_count = len(food_list)
+        # จำนวนอาหาร: ให้ความสำคัญสูง
+        food_count = len(foods)
         score = -1000 * food_count
 
-        # รางวัลรอง: เข้าใกล้อาหาร (คงเดิม)
-        if food_list:
-            min_food_dist = min(manhattan_distance(pacman_pos, food) for food in food_list)
-            score -= 10 * min_food_dist
-            if min_food_dist == 1:
+        # ใกล้อาหาร
+        if foods:
+            min_f = min(manhattan(pac, f) for f in foods)
+            score -= 10 * min_f
+            if min_f == 1:
                 score += 300
 
-        # --- START: THE DEFINITIVE FIX ---
-        # เราจะลงโทษการเดินซ้ำที่ "ก็ต่อเมื่อ" ยังเหลืออาหารมากกว่า 1 เม็ดเท่านั้น
-        # เพื่อให้ตอนจบเกม Pacman สามารถเดินย้อนกลับไปกินเม็ดสุดท้ายได้โดยไม่โดนลงโทษ
-        if food_count > 1 and pacman_pos in position_history:
+        # ลงโทษการวน เฉพาะตอนอาหาร > 1
+        if food_count > 1 and pac in pos_hist:
             score -= 100
-        # --- END: THE DEFINITIVE FIX ---
 
-        score += ghost_penalty
-
+        score += ghost_pen
         return score
+
+    def _eval_for_ordering(self, state):
+        """heuristic เร็ว ๆ สำหรับเรียงลำดับการลองแอ็กชัน ช่วย prune ให้เร็วขึ้น"""
+        pac = state.getPacmanPosition()
+        foods = state.getFood().asList()
+        ghosts = state.getGhostStates()
+        gpos = [(int(g.getPosition()[0]), int(g.getPosition()[1])) for g in ghosts]
+
+        min_g = min((manhattan(pac, gp) for gp in gpos), default=999)
+        min_f = min((manhattan(pac, f) for f in foods), default=0)
+
+        # อยากห่างผีและใกล้อาหาร
+        return (min_g * 5) - (min_f * 3) + state.getScore() * 0.1
+
+    def _tt_key(self, state, agent_index, ply):
+        """คีย์สำหรับ Transposition table (สรุปสถานะให้พอจำได้)"""
+        pac = state.getPacmanPosition()
+        foods = tuple(sorted(state.getFood().asList())[:20])  # จำกัด 20 จุดแรกพอช่วย
+        ghosts = tuple((int(g.getPosition()[0]), int(g.getPosition()[1]), int(getattr(g, "scaredTimer", 0)))
+                       for g in state.getGhostStates())
+        return (pac, foods, ghosts, agent_index, ply % (self.depth * state.getNumAgents()))
