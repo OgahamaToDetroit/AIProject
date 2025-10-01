@@ -21,10 +21,69 @@ class PacmanAgent(Agent):
         if len(legal) > 1 and Directions.STOP in legal:
             legal.remove(Directions.STOP)
 
+        # --- START: THE "SMART" GREEDY ENDGAME SWITCH ---
+        food_list = state.getFood().asList()
+        
+        # ถ้าเหลืออาหาร 1 เม็ด ให้เปลี่ยนเป็นโหมด Greedy ที่ฉลาดขึ้น
+        if len(food_list) == 1:
+            best_score = -float('inf')
+            best_action = None
+            pacman_pos = state.getPacmanPosition()
+            
+            for action in legal:
+                successor = state.generateSuccessor(0, action)
+                if successor.isLose():
+                    continue # ถ้าเดินไปแล้วแพ้ทันที ไม่ต้องพิจารณา
+
+                successor_pos = successor.getPacmanPosition()
+                dist_to_food = manhattan_distance(successor_pos, food_list[0])
+                
+                ghost_positions = [g.getPosition() for g in successor.getGhostStates()]
+                dist_to_ghost = min([manhattan_distance(successor_pos, g) for g in ghost_positions])
+
+                # ให้คะแนนโดยพิจารณา 2 อย่าง: ระยะห่างจากอาหาร และ ระยะห่างจากผี
+                # ทำให้มันอยากเข้าใกล้อาหาร แต่ก็ยังกลัวผีอยู่ด้วย
+                score = (dist_to_ghost * 2) - (dist_to_food * 3)
+
+                if score > best_score:
+                    best_score = score
+                    best_action = action
+
+            return best_action
+        # --- END: THE "SMART" GREEDY ENDGAME SWITCH ---
+
+
+        # ถ้ายังเหลืออาหารเยอะ ให้ใช้ Alpha-Beta ที่ซับซ้อนและฉลาดเหมือนเดิม
+        best_score = -float('inf')
+        best_action = None
+
+        # Update position history (ยังคงเดิม)
+        curr_pos = state.getPacmanPosition()
+        self.position_history.append(curr_pos)
+        if len(self.position_history) > 4:
+            self.position_history.pop(0)
+
+        for action in legal:
+            successor = state.generateSuccessor(0, action)
+            score = self.alpha_beta(
+                successor,
+                1,
+                1,
+                list(self.position_history),
+                float('-inf'),
+                float('inf')
+            )
+            if score > best_score:
+                best_score = score
+                best_action = action
+
+        return best_action if best_action else legal[0]
+
+        # ถ้ายังเหลืออาหารเยอะ ให้ใช้ Alpha-Beta ที่ซับซ้อนและฉลาดเหมือนเดิม
         best_score = float('-inf')
         best_action = None
 
-        # Update position history
+        # Update position history (ยังคงเดิม)
         curr_pos = state.getPacmanPosition()
         self.position_history.append(curr_pos)
         if len(self.position_history) > 4:
@@ -94,10 +153,10 @@ class PacmanAgent(Agent):
         ghost_states = state.getGhostStates()
         ghost_positions = [g.getPosition() for g in ghost_states]
 
-        # โทษผีแบบแปรผัน
+        # โทษผีแบบแปรผัน (คงเดิม)
         min_ghost_dist = min(manhattan_distance(pacman_pos, g) for g in ghost_positions)
         if min_ghost_dist == 0:
-            return -1e9  # ชนผี = แพ้
+            return -1e9
         elif min_ghost_dist == 1:
             ghost_penalty = -300
         elif min_ghost_dist == 2:
@@ -107,20 +166,23 @@ class PacmanAgent(Agent):
         else:
             ghost_penalty = 0
 
-        # รางวัลหลัก: ลดจำนวนอาหาร
+        # รางวัลหลัก: ลดจำนวนอาหาร (คงเดิม)
         food_count = len(food_list)
         score = -1000 * food_count
 
-        # รางวัลรอง: เข้าใกล้อาหาร
+        # รางวัลรอง: เข้าใกล้อาหาร (คงเดิม)
         if food_list:
             min_food_dist = min(manhattan_distance(pacman_pos, food) for food in food_list)
             score -= 10 * min_food_dist
             if min_food_dist == 1:
-                score += 200
+                score += 300
 
-        # ลดคะแนนถ้าเดิน loop
-        if pacman_pos in position_history:
+        # --- START: THE DEFINITIVE FIX ---
+        # เราจะลงโทษการเดินซ้ำที่ "ก็ต่อเมื่อ" ยังเหลืออาหารมากกว่า 1 เม็ดเท่านั้น
+        # เพื่อให้ตอนจบเกม Pacman สามารถเดินย้อนกลับไปกินเม็ดสุดท้ายได้โดยไม่โดนลงโทษ
+        if food_count > 1 and pacman_pos in position_history:
             score -= 100
+        # --- END: THE DEFINITIVE FIX ---
 
         score += ghost_penalty
 
